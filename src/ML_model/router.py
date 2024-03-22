@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, UploadFile
+from fastapi.responses import JSONResponse
 from main import fastapi_users
 from sqlalchemy import select, insert, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,6 +8,7 @@ from ML_model.ml_model import model_predict
 from ML_model.models import mushroom
 from ML_model.schemas import Mushroom
 from fastapi_cache.decorator import cache
+from catboost import CatboostError
 from typing import List
 import pandas as pd
 import json
@@ -27,8 +29,12 @@ async def get_prediction(user=Depends(current_user), session: AsyncSession = Dep
     query = select(mushroom).where(mushroom.c.id == user.id)
     result = await session.execute(query)
     df = pd.DataFrame(result.one()[1])
-    pred = model_predict(df)
-    return list(pred)
+    try:
+       pred = model_predict(df)
+    except CatboostError as e:
+        return JSONResponse(status_code=400, content={'message': 'Error in prediction'})
+    df['prediction'] = pred
+    return json.loads(df.to_json(orient='records'))
 
 
 @router.post('/add_data')
@@ -70,18 +76,21 @@ async def add_csv(file: UploadFile, user=Depends(current_user), session: AsyncSe
     content = file.file.read()
     buffer = io.BytesIO(content)
     df = pd.read_csv(buffer)
-    result = await session.execute(select(mushroom).where(mushroom.c.id == user.id))
-    if len(result.all()) == 0:
-        await session.execute(insert(mushroom).values(id=user.id, Info=json.loads(df.to_json(orient='records'))))
-        await session.commit()
+    columns_list = ['cap-shape', 'cap-surface', 'cap-color', 'bruises', 'odor',
+       'gill-attachment', 'gill-spacing', 'gill-size', 'gill-color',
+       'stalk-shape', 'stalk-root', 'stalk-surface-above-ring',
+       'stalk-surface-below-ring', 'stalk-color-above-ring',
+       'stalk-color-below-ring', 'veil-type', 'veil-color', 'ring-number',
+       'ring-type', 'spore-print-color', 'population', 'habitat']
+    if list(df.columns) == columns_list:
+        result = await session.execute(select(mushroom).where(mushroom.c.id == user.id))
+        if len(result.all()) == 0:
+           await session.execute(insert(mushroom).values(id=user.id, Info=json.loads(df.to_json(orient='records'))))
+           await session.commit()
+        else:
+           stmt = update(mushroom).where(mushroom.c.id == user.id).values(Info=json.loads(df.to_json(orient='records')))
+           await session.execute(stmt)
+           await session.commit()
+        return {"status": "success"}
     else:
-        stmt = update(mushroom).where(mushroom.c.id == user.id).values(Info=json.loads(df.to_json(orient='records')))
-        await session.execute(stmt)
-        await session.commit()
-    return {"status": "success"}
-
-
-
-
-
-
+        return JSONResponse(status_code=400, content={'message': 'Invalid columns names'})
